@@ -1,96 +1,136 @@
 import streamlit as st
+import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy.stats import norm
 
 # --- MOTORE MATEMATICO ---
-def black_scholes_put(S, K, T, r, sigma):
+def calcola_prezzo_opzione(S, K, T, r, sigma, tipo_opzione):
     """
-    Calcola il prezzo di una Put europea usando Black-Scholes.
-    Se T è vicinissimo a 0, restituisce direttamente il valore intrinseco per evitare errori di divisione.
+    Calcola il prezzo dell'opzione. Se T <= 0, restituisce il puro valore intrinseco.
     """
     if T <= 0.0001:
-        return np.maximum(K - S, 0.0)
-    
+        if tipo_opzione == 'Call':
+            return np.maximum(S - K, 0.0)
+        else:
+            return np.maximum(K - S, 0.0)
+            
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    put_price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-    return put_price
+    
+    if tipo_opzione == 'Call':
+        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    else:
+        return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
-# --- INTERFACCIA STREAMLIT ---
-st.set_page_config(page_title="Opzioni: Payoff a Scadenza", layout="wide")
-st.title("Simulatore Strategia SPY: Risoluzione Bug OptionStrat")
-st.markdown("Grafico del payoff simulato alla chiusura del **26 maggio**.")
+# --- SETUP PAGINA ---
+st.set_page_config(page_title="Costruttore Opzioni Dinamico", layout="wide")
+st.title("Costruttore Strategie Dinamico")
+st.markdown("Usa la tabella qui sotto per aggiungere o rimuovere gambe. Il sistema calcolerà il payoff tenendo conto della scadenza specifica di ogni opzione, evitando errori matematici sulla volatilità residua.")
 
-# --- SIDEBAR (PARAMETRI) ---
+# --- SIDEBAR (PARAMETRI GLOBALI) ---
 st.sidebar.header("Parametri di Mercato")
-current_price = st.sidebar.number_input("Prezzo Attuale SPY", value=760.0, step=1.0)
-iv_long = st.sidebar.slider("Volatilità Residua (Opzioni 27 Maggio) %", min_value=1.0, max_value=50.0, value=15.0, step=1.0) / 100
-risk_free_rate = 0.05 # Tasso privo di rischio standard al 5%
+prezzo_attuale = st.sidebar.number_input("Prezzo Attuale Sottostante", value=760.0, step=1.0)
+giorni_simulazione = st.sidebar.slider("Valuta la strategia tra X giorni:", min_value=0, max_value=30, value=9, help="Quanti giorni passano da oggi al momento della chiusura? (es. 9 per arrivare al 26 Maggio)")
 
-st.sidebar.header("Struttura del Trade")
-st.sidebar.markdown("**Gambe Short (Scadenza Oggi: 26 Maggio)**")
-strike_short_1 = st.sidebar.number_input("Strike Short Put 1", value=757.0)
-strike_short_2 = st.sidebar.number_input("Strike Short Put 2", value=764.0)
+tasso_risk_free = 0.05
 
-st.sidebar.markdown("**Gambe Long (Scadenza Domani: 27 Maggio)**")
-strike_long = st.sidebar.number_input("Strike Long Put (x2)", value=761.0)
+# --- TABELLA DINAMICA DELLE GAMBE ---
+st.subheader("Gambe della Strategia")
 
-net_debit = st.sidebar.number_input("Debito Pagato Inizialmente ($)", value=78.50)
+# Dati di default (impostati sulla tua strategia SPY)
+dati_iniziali = {
+    "Azione": ["Short", "Short", "Long"],
+    "Tipo": ["Put", "Put", "Put"],
+    "Quantità": [1, 1, 2],
+    "Strike": [757.0, 764.0, 761.0],
+    "Scadenza (Giorni)": [9, 9, 10], # 9 giorni per il 26 Maggio, 10 per il 27
+    "Volatilità (%)": [16.0, 16.0, 16.0],
+    "Prezzo d'Ingresso ($)": [1.50, 4.00, 2.35] # Prezzi ipotetici per generare un debito
+}
 
-# --- CALCOLO DEL PAYOFF ---
-# Creiamo un array di possibili prezzi dello SPY a scadenza
-prices = np.linspace(current_price - 40, current_price + 40, 500)
+df_iniziale = pd.DataFrame(dati_iniziali)
 
-# 1. Valore a scadenza della Short Put 757 (T=0)
-# Essendo venduta, incassiamo il premio, ma a scadenza paghiamo il valore intrinseco.
-payoff_short_1 = -np.maximum(strike_short_1 - prices, 0.0)
-
-# 2. Valore a scadenza della Short Put 764 (T=0)
-payoff_short_2 = -np.maximum(strike_short_2 - prices, 0.0)
-
-# 3. Valore residuo delle due Long Put 761 (T = 1 giorno = 1/365 anni)
-# Qui usiamo Black-Scholes perché queste opzioni sopravvivono un altro giorno!
-T_residuo = 1 / 365 
-valore_long_singola = black_scholes_put(prices, strike_long, T_residuo, risk_free_rate, iv_long)
-payoff_long_totale = 2 * valore_long_singola
-
-# Calcolo del Profitto Netto Totale
-# (Valore finale della struttura) - (Costo per aprirla)
-total_payoff = payoff_short_1 + payoff_short_2 + payoff_long_totale - net_debit
-
-# --- GRAFICO PLOTLY ---
-fig = go.Figure()
-
-# Aggiungiamo la linea del PnL
-fig.add_trace(go.Scatter(
-    x=prices, 
-    y=total_payoff, 
-    mode='lines', 
-    name='Payoff Netto',
-    line=dict(color='white', width=3),
-    fill='tozeroy',
-    fillcolor='rgba(0, 255, 0, 0.1)' # Verde in trasparenza per i profitti
-))
-
-# Evidenziamo l'asse zero
-fig.add_hline(y=0, line_dash="dash", line_color="gray")
-
-# Linea verticale sul prezzo attuale
-fig.add_vline(x=current_price, line_dash="dot", line_color="blue", annotation_text="Prezzo Attuale")
-
-# Formattazione del grafico
-fig.update_layout(
-    title=f"Payoff il 26 Maggio (Max Perdita blindata a -${net_debit})",
-    xaxis_title="Prezzo SPY a Scadenza",
-    yaxis_title="Profitto / Perdita ($)",
-    template="plotly_dark",
-    hovermode="x unified"
+# Editor dinamico di Streamlit
+df_gambe = st.data_editor(
+    df_iniziale,
+    num_rows="dynamic", # Permette di aggiungere e rimuovere righe
+    column_config={
+        "Azione": st.column_config.SelectboxColumn("Azione", options=["Long", "Short"], required=True),
+        "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Call", "Put"], required=True),
+        "Quantità": st.column_config.NumberColumn("Q.tà", min_value=1, step=1, required=True),
+        "Scadenza (Giorni)": st.column_config.NumberColumn("DTE", min_value=0, step=1, required=True),
+    },
+    use_container_width=True
 )
 
-st.plotly_chart(fig, use_container_width=True)
+# --- CALCOLO DEL PAYOFF ---
+if len(df_gambe) > 0:
+    prezzi_simulati = np.linspace(prezzo_attuale * 0.90, prezzo_attuale * 1.10, 500)
+    payoff_totale = np.zeros_like(prezzi_simulati)
+    costo_totale_struttura = 0.0
 
-# Spiegazione a schermo
-st.info("""
-**Perché questo grafico è corretto:** Il codice azzera matematicamente il valore temporale delle opzioni in scadenza oggi (26 Maggio), ma applica il modello Black-Scholes per calcolare il valore esatto delle due Put in scadenza domani (27 Maggio). Questo dimostra che anche abbassando la volatilità dalla barra laterale, la tua perdita massima non scenderà mai sotto il debito iniziale pagato.
-""")
+    for index, row in df_gambe.iterrows():
+        azione = row["Azione"]
+        tipo = row["Tipo"]
+        qta = int(row["Quantità"])
+        strike = float(row["Strike"])
+        dte_iniziale = float(row["Scadenza (Giorni)"])
+        volatilita = float(row["Volatilità (%)"]) / 100
+        prezzo_ingresso = float(row["Prezzo d'Ingresso ($)"])
+        
+        # Moltiplicatore base (Long = compro e pago, Short = vendo e incasso)
+        moltiplicatore = 1 if azione == "Long" else -1
+        
+        # Calcolo del costo/credito iniziale (moltiplicato per 100)
+        costo_gamba = prezzo_ingresso * qta * moltiplicatore * 100
+        costo_totale_struttura += costo_gamba
+        
+        # Giorni rimanenti al momento della simulazione
+        giorni_rimanenti = max(dte_iniziale - giorni_simulazione, 0)
+        T_rimanente = giorni_rimanenti / 365.0
+        
+        # Calcolo valore futuro dell'opzione
+        valore_futuro_singolo = calcola_prezzo_opzione(prezzi_simulati, strike, T_rimanente, tasso_risk_free, volatilita, tipo)
+        
+        # Payoff netto della gamba
+        # (Valore Futuro - Costo Iniziale) * moltiplicatore * Quantità * 100
+        payoff_gamba = (valore_futuro_singolo - prezzo_ingresso) * moltiplicatore * qta * 100
+        
+        # Aggiungiamo al totale
+        payoff_totale += payoff_gamba
+
+    # --- GRAFICO PLOTLY ---
+    st.subheader(f"Grafico del Payoff tra {giorni_simulazione} giorni")
+    
+    # Riassunto Costi
+    debito_o_credito = "Debito Netto" if costo_totale_struttura > 0 else "Credito Netto"
+    st.markdown(f"**{debito_o_credito} Iniziale:** ${abs(costo_totale_struttura):.2f}")
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=prezzi_simulati, 
+        y=payoff_totale, 
+        mode='lines', 
+        name=f'Payoff a {giorni_simulazione}gg',
+        line=dict(color='white', width=3),
+        fill='tozeroy',
+        fillcolor='rgba(0, 255, 0, 0.1)' if max(payoff_totale) > 0 else 'rgba(255, 0, 0, 0.1)'
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig.add_vline(x=prezzo_attuale, line_dash="dot", line_color="blue", annotation_text="Prezzo Attuale")
+
+    fig.update_layout(
+        xaxis_title="Prezzo Sottostante",
+        yaxis_title="Profitto / Perdita Totale ($)",
+        template="plotly_dark",
+        hovermode="x unified",
+        margin=dict(l=20, r=20, t=30, b=20)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.warning("Aggiungi almeno una gamba alla tabella per vedere il grafico.")

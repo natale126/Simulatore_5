@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from scipy.stats import norm
+import yfinance as yf
 
 # --- MOTORE MATEMATICO ---
 def calcola_prezzo_opzione(S, K, T, r, sigma, tipo_opzione):
@@ -33,6 +34,20 @@ tasso_risk_free = st.sidebar.number_input("Tasso Interesse Risk-Free", value=0.0
 
 st.sidebar.markdown("---")
 attiva_bug = st.sidebar.checkbox("Attiva BUG OptionStrat", value=False)
+
+# --- SEZIONE YAHOO FINANCE ---
+st.subheader("Catena delle Opzioni Reale (Yahoo Finance)")
+try:
+    ticker = "SPY"
+    spy_data = yf.Ticker(ticker)
+    scadenze_disponibili = spy_data.options
+    scadenza_selezionata = st.selectbox("Seleziona una Scadenza reale presente sul mercato:", scadenze_disponibili)
+    
+    opt_chain = spy_data.option_chain(scadenza_selezionata)
+    puts_reali = opt_chain.puts[['strike', 'lastPrice', 'bid', 'ask', 'impliedVolatility']]
+    st.dataframe(puts_reali.head(10), use_container_width=True)
+except:
+    st.warning("Impossibile caricare l'Option Chain in questo momento.")
 
 # --- TABELLA GAMBE ---
 st.subheader("Configurazione Gambe Strategia")

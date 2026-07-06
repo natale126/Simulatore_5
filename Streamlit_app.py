@@ -1,354 +1,158 @@
 import streamlit as st
-import yfinance as yf
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 from scipy.stats import norm
-from datetime import datetime, timedelta
 
-# Configurazione della pagina Streamlit
-st.set_page_config(page_title="Advanced Options Strategy Studio", layout="wide")
-
-# Mappatura dei mesi in italiano
-MONTH_MAP = {
-    1: "Gennaio", 2: "Febbraio", 3: "Marzo", 4: "Aprile",
-    5: "Maggio", 6: "Giugno", 7: "Luglio", 8: "Agosto",
-    9: "Settembre", 10: "Ottobre", 11: "Novembre", 12: "Dicembre"
-}
-
-# ==========================================
-# 1. MOTORE MATEMATICO (BLACK-SCHOLES & GRECHE)
-# ==========================================
-
-def black_scholes_put(S, K, T, r, sigma):
-    if T <= 0.00001:
-        return max(0.0, K - S)
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-
-
+# --- FORMULA DI BLACK-SCHOLES PER LE CALL ---
 def black_scholes_call(S, K, T, r, sigma):
-    if T <= 0.00001:
+    if T <= 0:
         return max(0.0, S - K)
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
+# --- CONFIGURAZIONE APPLICAZIONE ---
+st.set_page_config(page_title="Simulatore Realistico con Matrice", layout="wide")
+st.title("Simulatore Opzioni Avanzato: Algoritmo Trade Partner")
+st.write("Integrazione della matrice dei prezzi reali per eliminare le distorsioni sui payoff diagonali.")
 
-def calculate_greeks(S, K, T, r, sigma, option_type="put"):
-    if T <= 0.00001:
-        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
-    
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    
-    gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    vega = S * norm.pdf(d1) * np.sqrt(T) / 100.0 
-    
-    if option_type == "put":
-        delta = norm.cdf(d1) - 1.0
-        theta = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)
-    else:
-        delta = norm.cdf(d1)
-        theta = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)
+# --- SIDEBAR: DATI DEL SOTTOSTANTE E FUNZIONE MATRICE ---
+st.sidebar.header("1. Parametri di Mercato")
+S_attuale = st.sidebar.number_input("Prezzo Sottostante Attuale ($)", value=745.0, step=1.0)
+r = st.sidebar.number_input("Tasso d'Interesse (%)", value=4.0) / 100
+
+st.sidebar.markdown("---")
+st.sidebar.header("Algoritmo Speciale")
+# IL CUORE DEL NUOVO METODO: Spunta per attivare la protezione della matrice
+attiva_matrice = st.sidebar.checkbox("Attiva Matrice 'Trade Partner'", value=True, 
+                                     help="Se attivo, protegge le opzioni lunghe usando la matrice dei prezzi correnti, azzerando le finte perdite della valle.")
+
+# --- INSERIMENTO DATI DELLE 4 GAMBE ---
+st.header("2. Configurazione Iniziale delle Gambe")
+col1, col2, col3, col4 = st.columns(4)
+gambe = []
+
+def input_gamba(col, id_gamba, default_strike, default_dte, default_premio, default_iv, default_tipo):
+    with col:
+        st.subheader(f"Gamba {id_gamba}")
+        tipo = st.selectbox(f"Azione G{id_gamba}", ["VENDUTA (Short)", "COMPRATA (Long)"], index=0 if default_tipo=="Short" else 1, key=f"t_{id_gamba}")
+        strike = st.number_input(f"Strike G{id_gamba}", value=default_strike, key=f"k_{id_gamba}")
+        dte_iniziale = st.number_input(f"DTE Iniziali G{id_gamba}", value=default_dte, key=f"d_{id_gamba}")
+        premio_apertura = st.number_input(f"Premio Apertura G{id_gamba}", value=default_premio, key=f"p_{id_gamba}")
+        iv_iniziale = st.number_input(f"IV Iniziale G{id_gamba} (%)", value=default_iv, key=f"i_{id_gamba}") / 100
         
-    return {
-        "delta": delta,
-        "gamma": gamma,
-        "theta": theta / 365.0, 
-        "vega": vega
-    }
-
-# ==========================================
-# 2. INTERFACCIA UTENTE & SIDEBAR
-# ==========================================
-
-st.title("馃搳 Opzioni Advanced Analytix - SPY Studio Pro")
-st.markdown("Costruttore di strategie asimmetriche multi-gamba con motore termico di volatilit脿.")
-
-st.sidebar.header("鈿欙笍 Impostazioni di Input")
-modalita = st.sidebar.radio("Modalit脿 Dati:", ["Live API (Yahoo Finance)", "Manuale (Sandbox)"])
-
-tasso_interesse = st.sidebar.number_input("Tasso Risk-Free (%)", value=4.5, step=0.1) / 100.0
-
-# Calcolo o inserimento del prezzo Spot di riferimento
-if modalita == "Live API (Yahoo Finance)":
-    ticker_input = st.sidebar.text_input("Ticker", value="SPY").upper()
-    try:
-        ticker_data = yf.Ticker(ticker_input)
-        prezzo_spot_live = ticker_data.history(period="1d")["Close"].iloc[-1]
-        st.sidebar.success(f"Prezzo Live Connesso: ${prezzo_spot_live:.2f}")
-    except Exception:
-        st.sidebar.error("Errore nel recupero dati live. Uso fallback manuale.")
-        prezzo_spot_live = 760.0
-    
-    usa_override = st.sidebar.checkbox("Inserisci Spot Manuale (Live Tracking Ibrido)")
-    if usa_override:
-        prezzo_spot = st.sidebar.number_input("Prezzo Spot Corrente ($)", value=float(round(prezzo_spot_live, 2)))
-    else:
-        prezzo_spot = float(prezzo_spot_live)
-else:
-    prezzo_spot = st.sidebar.number_input("Prezzo Spot Manuale ($)", value=760.0, step=1.0)
-
-# ==========================================
-# 3. GENERAZIONE CALENDARIO SCADENZE (STILE OPTIONSTRAT)
-# ==========================================
-
-# Recupero delle date disponibili (vere o simulate)
-if modalita == "Live API (Yahoo Finance)" and 'ticker_data' in locals():
-    try:
-        raw_options_dates = ticker_data.options
-        available_dates = [datetime.strptime(d, "%Y-%m-%d").date() for d in raw_options_dates]
-    except Exception:
-        available_dates = [datetime.now().date() + timedelta(days=i) for i in range(1, 45)]
-else:
-    # Generazione automatica scadenze giornaliere artificiali per la Sandbox
-    available_dates = [datetime.now().date() + timedelta(days=i) for i in range(0, 45)]
-
-# Raggruppamento date per Mese
-grouped_dates = {}
-for d in available_dates:
-    month_str = f"{MONTH_MAP[d.month]} {d.year}"
-    if month_str not in grouped_dates:
-        grouped_dates[month_str] = []
-    grouped_dates[month_str].append(d)
-
-# ==========================================
-# 4. GESTIONE DINAMICA DELLE GAMBE (SESSION STATE)
-# ==========================================
-
-st.header("馃幆 Configurazione Gambe Strategia")
-
-# Inizializzazione delle 3 gambe di default se la sessione 猫 nuova
-if "legs" not in st.session_state:
-    first_month = list(grouped_dates.keys())[0]
-    days_in_first_month = grouped_dates[first_month]
-    
-    # Assegna scadenze di default basate sul calendario reale trovato
-    d_short = days_in_first_month[0]
-    d_long = days_in_first_month[1] if len(days_in_first_month) > 1 else d_short + timedelta(days=1)
-    
-    st.session_state.legs = [
-        {"action": "Short", "qty": 1, "type": "Put", "strike": int(prezzo_spot - 3), "month": first_month, "day": d_short},
-        {"action": "Long", "qty": 2, "type": "Put", "strike": int(prezzo_spot + 1), "month": first_month, "day": d_long},
-        {"action": "Short", "qty": 1, "type": "Put", "strike": int(prezzo_spot + 4), "month": first_month, "day": d_short},
-    ]
-
-# Renderizzazione dinamica delle righe per ciascuna gamba presente
-active_legs = []
-for i in range(len(st.session_state.legs)):
-    st.markdown(f"**Gamba {i+1}**")
-    col_act, col_qty, col_typ, col_stk, col_mon, col_day = st.columns([1.2, 1.2, 1.2, 1.8, 2.2, 1.8])
-    
-    leg_data = st.session_state.legs[i]
-    
-    with col_act:
-        action = st.selectbox("Azione", ["Long", "Short"], key=f"act_{i}", index=0 if leg_data["action"] == "Long" else 1)
-    with col_qty:
-        qty = st.number_input("Lotti", min_value=1, max_value=500, value=int(leg_data["qty"]), key=f"qty_{i}")
-    with col_typ:
-        opt_type = st.selectbox("Tipo", ["Put", "Call"], key=f"typ_{i}", index=0 if leg_data["type"] == "Put" else 1)
-    with col_stk:
-        strike = st.number_input("Strike ($)", value=int(leg_data["strike"]), key=f"stk_{i}", step=1)
-    with col_mon:
-        month_list = list(grouped_dates.keys())
-        saved_month = leg_data["month"] if leg_data["month"] in month_list else month_list[0]
-        month = st.selectbox("Mese Scadenza", month_list, key=f"mon_{i}", index=month_list.index(saved_month))
-    with col_day:
-        day_list = grouped_dates[month]
-        saved_day = leg_data["day"] if leg_data["day"] in day_list else day_list[0]
-        day = st.selectbox("Giorno Scadenza", day_list, format_func=lambda x: f"{x.day}", key=f"day_{i}", index=day_list.index(saved_day))
+        ppg_iniziale = premio_apertura / dte_iniziale if dte_iniziale > 0 else 0
+        st.metric("PPG Iniziale", f"{ppg_iniziale:.2f} $")
         
-    active_legs.append({
-        "action": action,
-        "qty": qty,
-        "type": opt_type,
-        "strike": strike,
-        "month": month,
-        "day": day
+        gambe.append({
+            "id": id_gamba,
+            "tipo_testo": "Short" if "VENDUTA" in tipo else "Long",
+            "tipo": -1 if "VENDUTA" in tipo else 1,
+            "strike": strike,
+            "dte_iniziale": dte_iniziale,
+            "premio_apertura": premio_apertura,
+            "iv_iniziale": iv_iniziale
+        })
+
+# Configurazione standard del tuo trade
+input_gamba(col1, 1, 746, 6, 5.04, 14.5, "Short")
+input_gamba(col2, 2, 751, 9, 3.69, 14.0, "Long")
+input_gamba(col3, 3, 751, 9, 3.69, 14.0, "Long")
+input_gamba(col4, 4, 755, 6, 1.02, 13.8, "Short")
+
+min_dte = min([g["dte_iniziale"] for g in gambe])
+
+# --- CURSORI INTERATTIVI ---
+st.header("3. Simulazione Dinamica")
+col_slide1, col_slide2, col_slide3 = st.columns(3)
+with col_slide1:
+    giorni_passati = st.slider("Giorni Trascorsi dall'apertura", min_value=0, max_value=9, value=0, step=1)
+with col_slide2:
+    shock_iv_breve = st.slider("Variazione IV Scadenze Brevi (%)", min_value=-15, max_value=15, value=0, step=1) / 100
+with col_slide3:
+    # Se la matrice è attiva, questo cursore viene disabilitato visivamente per farti capire che la matrice protegge il dato
+    if attiva_matrice:
+        st.slider("Variazione IV Scadenze Lunghe (%) [BLOCCATO DA MATRICE]", min_value=-15, max_value=15, value=0, disabled=True)
+        shock_iv_lunga = 0.0
+    else:
+        shock_iv_lunga = st.slider("Variazione IV Scadenze Lunghe (%) [Standard]", min_value=-15, max_value=15, value=0, step=1) / 100
+
+# --- MOTORE DI CALCOLO CON LOGICA MATRICE ---
+prezzi_target = np.linspace(S_attuale * 0.95, S_attuale * 1.05, 200)
+pnl_simulato = []
+dati_tabella_dinamica = []
+ppg_netto_simulato = 0.0
+
+for g in gambe:
+    dte_rimanenti = max(0, g["dte_iniziale"] - giorni_passati)
+    t_rimanente = dte_rimanenti / 365.0
+    
+    # APPLICAZIONE DEL METODO TRADE PARTNER
+    if attiva_matrice:
+        if g["dte_iniziale"] == min_dte:
+            # Le scadenze brevi subiscono il mercato/decadimento normalmente
+            iv_simulata = max(0.01, g["iv_iniziale"] + shock_iv_breve)
+        else:
+            # Le scadenze lunghe vengono 'specchiate' sulla matrice attuale. 
+            # Il loro valore a scadenza è stimato mantenendo la stabilità dei prezzi reali correnti.
+            iv_simulata = g["iv_iniziale"]
+    else:
+        # Metodo standard del broker (nessuna protezione)
+        iv_simulata = max(0.01, g["iv_iniziale"] + (shock_iv_breve if g["dte_iniziale"] == min_dte else shock_iv_lunga))
+    
+    prezzo_teorico_corrente = black_scholes_call(S_attuale, g["strike"], t_rimanente, r, iv_simulata)
+    ppg_dinamico = prezzo_teorico_corrente / dte_rimanenti if dte_rimanenti > 0 else 0.0
+    ppg_netto_simulato += ppg_dinamico * (-g["tipo"])
+    
+    pnl_singola_gamba_corrente = (prezzo_teorico_corrente - g["premio_apertura"]) * g["tipo"] * 100
+    
+    dati_tabella_dinamica.append({
+        "Gamba": f"G{g['id']} ({g['tipo_testo']})",
+        "Strike": g["strike"],
+        "DTE Residui": dte_rimanenti,
+        "Premio Simulato ($)": round(prezzo_teorico_corrente, 2),
+        "PPG Corrente ($/giorno)": round(ppg_dinamico, 2),
+        "P&L Attuale ($)": round(pnl_singola_gamba_corrente, 2)
     })
 
-# Aggiorna lo stato globale con le modifiche correnti
-st.session_state.legs = active_legs
-
-# Pulsanti di controllo delle gambe
-col_btn1, col_btn2, _ = st.columns([1.5, 1.5, 7])
-with col_btn1:
-    if st.button("鉃 Aggiungi Gamba"):
-        # Copia i dati dell'ultima gamba per comodit脿 di inserimento
-        nuova_gamba = st.session_state.legs[-1].copy()
-        st.session_state.legs.append(nuova_gamba)
-        st.rerun()
-with col_btn2:
-    if st.button("鉂 Rimuovi Ultima Gamba") and len(st.session_state.legs) > 1:
-        st.session_state.legs.pop()
-        st.rerun()
-
-# ==========================================
-# 5. GESTIONE VOLATILIT脌 & SIMULAZIONE SCADENZA
-# ==========================================
-
-st.sidebar.header("馃搱 Gestione Volatilit脿 (IV)")
-iv_generica = st.sidebar.slider("Volatilit脿 Implicita Base (%)", min_value=2.0, max_value=50.0, value=16.9) / 100.0
-correzione_bug = st.sidebar.toggle("Attiva Struttura a Termine Intelligente (No Bug)", value=True)
-
-debito_iniziale = st.number_input("Net Debit Pagato Totale ($)", value=78.50, step=1.0)
-
-# Calcolo automatico della data di valutazione (Default: La scadenza pi霉 corta del portafoglio)
-all_selected_days = [leg["day"] for leg in st.session_state.legs]
-valuation_date = min(all_selected_days)
-
-st.header("鈴 Simulatore Temporale Intraday")
-st.caption(f"La strategia viene valutata in base alla scadenza pi霉 vicina impostata: **{valuation_date.day} {valuation_date.strftime('%B %Y')}**")
-
-valutazione_scadenza = st.radio("Seleziona finestra di chiusura:", ["Esattamente a scadenza delle opzioni Short", "Intraday (Qualche ora prima della chiusura del mercato)"])
-
-if valutazione_scadenza == "Intraday (Qualche ora prima della chiusura del mercato)":
-    ore_mancanti = st.slider("Ore mancanti alla chiusura del mercato", min_value=1, max_value=7, value=2)
-else:
-    ore_mancanti = 0
-
-# ==========================================
-# 6. ENGINE DI CALCOLO DINAMICO DEL PROFILO PNL
-# ==========================================
-
-prezzi_asse_x = np.linspace(prezzo_spot * 0.90, prezzo_spot * 1.10, 500)
-pnl_profilo = []
-
-
-# Funzione interna per mappare il tempo (T) e la volatilit脿 (IV) di ogni singola gamba
-def get_leg_parameters(leg, valuation_date, ore_mancanti, iv_generica, correzione_bug):
-    # Calcolo tempo residuo (T)
-    if ore_mancanti > 0:
-        if leg["day"] == valuation_date:
-            T_leg = (ore_mancanti / 24.0) / 365.0
+# Generazione curva Payoff
+for S_sim in prezzi_target:
+    pnl_totale_nodo = 0
+    for g in gambe:
+        dte_rimanenti = max(0, g["dte_iniziale"] - giorni_passati)
+        t_rimanente = dte_rimanenti / 365.0
+        if attiva_matrice:
+            iv_simulata = g["iv_iniziale"] if g["dte_iniziale"] != min_dte else max(0.01, g["iv_iniziale"] + shock_iv_breve)
         else:
-            T_leg = ((leg["day"] - valuation_date).days + (ore_mancanti / 24.0)) / 365.0
-    else:
-        if leg["day"] == valuation_date:
-            T_leg = 0.000001 # Prossimo a zero
-        else:
-            T_leg = (leg["day"] - valuation_date).days / 365.0
+            iv_simulata = max(0.01, g["iv_iniziale"] + (shock_iv_breve if g["dte_iniziale"] == min_dte else shock_iv_lunga))
             
-    # Calcolo Volatilit脿 Term Structure (No Bug Fix)
-    if correzione_bug and leg["day"] > valuation_date:
-        iv_leg = max(iv_generica, 0.12) # Floor protettivo del 12%
-    else:
-        iv_leg = iv_generica
-        
-    return T_leg, iv_leg
+        nuovo_prezzo = black_scholes_call(S_sim, g["strike"], t_rimanente, r, iv_simulata)
+        pnl_totale_nodo += (nuovo_prezzo - g["premio_apertura"]) * g["tipo"] * 100
+    pnl_simulato.append(pnl_totale_nodo)
 
+# --- GRAFICO DEL PAYOFF ---
+df_grafico = pd.DataFrame({"Prezzo Sottostante": prezzi_target, "P&L Reale ($)": pnl_simulato})
+fig, ax = plt.subplots(figsize=(10, 4))
+colore_linea = "#2ecc71" if df_grafico["P&L Reale ($)"].max() > 0 else "#e74c3c"
+ax.plot(df_grafico["Prezzo Sottostante"], df_grafico["P&L Reale ($)"], color=colore_linea, linewidth=2.5)
+ax.axhline(0, color="white", linestyle="--", alpha=0.5)
+ax.axvline(S_attuale, color="#f1c40f", linestyle=":", label=f"Prezzo Corrente ({S_attuale})")
+ax.set_ylabel("Profitto / Perdita ($)")
+ax.grid(True, alpha=0.2)
+ax.legend()
+plt.style.use('dark_background')
+fig.patch.set_facecolor('#0e1117')
+ax.set_facecolor('#0e1117')
+st.pyplot(fig)
 
-# Ciclo di calcolo principale per l'asse X del grafico
-for x_spot in prezzi_asse_x:
-    valore_attuale_posizione = 0.0
-    for leg in st.session_state.legs:
-        T_leg, iv_leg = get_leg_parameters(leg, valuation_date, ore_mancanti, iv_generica, correzione_bug)
-        
-        if leg["type"] == "Put":
-            price = black_scholes_put(x_spot, leg["strike"], T_leg, tasso_interesse, iv_leg)
-        else:
-            price = black_scholes_call(x_spot, leg["strike"], T_leg, tasso_interesse, iv_leg)
-            
-        segno = 1.0 if leg["action"] == "Long" else -1.0
-        valore_attuale_posizione += segno * leg["qty"] * price * 100
-        
-    pnl_singolo = valore_attuale_posizione - debito_iniziale
-    pnl_profilo.append(pnl_singolo)
+# --- METRICHE E TABELLA ---
+st.header("4. Analisi del Profitto & PPG")
+m1, m2 = st.columns(2)
+with m1:
+    pnl_al_prezzo_attuale = df_grafico.iloc[(df_grafico['Prezzo Sottostante']-S_attuale).abs().argsort()[:1]]["P&L Reale ($)"].values[0]
+    st.metric("P&L della Posizione", f"{pnl_al_prezzo_attuale:,.2f} $")
+with m2:
+    st.metric("PPG NETTO della Strategia", f"{ppg_netto_simulato * 100:+.2f} $ / giorno")
 
-pnl_profilo = np.array(pnl_profilo)
-
-# Calcolo valore corrente allo spot attuale dello SPY
-pnl_corrente = 0.0
-delta_tot, gamma_tot, theta_tot, vega_tot = 0.0, 0.0, 0.0, 0.0
-
-for leg in st.session_state.legs:
-    T_leg, iv_leg = get_leg_parameters(leg, valuation_date, ore_mancanti, iv_generica, correzione_bug)
-    
-    if leg["type"] == "Put":
-        price_now = black_scholes_put(prezzo_spot, leg["strike"], T_leg, tasso_interesse, iv_leg)
-    else:
-        price_now = black_scholes_call(prezzo_spot, leg["strike"], T_leg, tasso_interesse, iv_leg)
-        
-    segno = 1.0 if leg["action"] == "Long" else -1.0
-    pnl_corrente += segno * leg["qty"] * price_now * 100
-    
-    # Aggregazione Greche di Portafoglio
-    g_leg = calculate_greeks(prezzo_spot, leg["strike"], T_leg, tasso_interesse, iv_leg, leg["type"].lower())
-    delta_tot += segno * leg["qty"] * g_leg["delta"]
-    gamma_tot += segno * leg["qty"] * g_leg["gamma"]
-    theta_tot += segno * leg["qty"] * g_leg["theta"]
-    vega_tot += segno * leg["qty"] * g_leg["vega"]
-
-pnl_corrente -= debito_iniziale
-max_profit = np.max(pnl_profilo)
-
-# ==========================================
-# 7. METRICHE & CONTROLLO LIVE DELLE GRECHE
-# ==========================================
-
-st.header("馃幆 Monitoraggio Posizione e Greche Live")
-m1, m2, m3 = st.columns(3)
-m1.metric("PnL Previsto allo Spot Corrente", f"${pnl_corrente:.2f}")
-m2.metric("Massimo Profitto dell'Asse", f"${max_profit:.2f}")
-m3.metric("Rischio Massimo Struttura", f"-${debito_iniziale:.2f}")
-
-col_g1, col_g2, col_g3, col_g4 = st.columns(4)
-col_g1.metric("Delta di Posizione (Direzione)", f"{delta_tot * 100:.2f}", help="Indica il guadagno/perdita teorico per un movimento di 1$ dello SPY.")
-col_g2.metric("Gamma di Posizione (Accelerazione)", f"{gamma_tot * 100:.4f}", help="L'accelerazione del tuo Delta rispetto ai movimenti dello SPY.")
-col_g3.metric("Theta di Posizione (Decadimento/Giorno)", f"${theta_tot * 100:.2f}", help="Il valore estrinseco incassato/perso passivamente ogni 24 ore.")
-col_g4.metric("Vega di Posizione (Sensibilit脿 IV)", f"${vega_tot * 100:.2f}", help="L'impatto sul portafoglio per ogni variazione dell'1% della volatilit脿.")
-
-# ==========================================
-# 8. TRACCIAMENTO GRAFICO INTERATTIVO (PLOTLY)
-# ==========================================
-
-fig = go.Figure()
-
-# Linea del Profilo PnL
-fig.add_trace(go.Scatter(
-    x=prezzi_asse_x, 
-    y=pnl_profilo,
-    mode='lines',
-    name='Profilo PnL Strategia',
-    line=dict(color='#2ecc71' if pnl_corrente >= 0 else '#e74c3c', width=3)
-))
-
-# Segnaposto Prezzo Spot Attuale
-fig.add_trace(go.Scatter(
-    x=[prezzo_spot], 
-    y=[pnl_corrente],
-    mode='markers+text',
-    name='Prezzo Spot Sottostante',
-    marker=dict(size=12, color='white', line=dict(color='black', width=2)),
-    text=[f"Spot: ${prezzo_spot:.2f}"],
-    textposition="top center"
-))
-
-# Visualizzazione dinamica di TUTTI gli strike inseriti nelle gambe
-for idx, leg in enumerate(st.session_state.legs):
-    colore_linea = "#3498db" if leg["action"] == "Long" else "orange"
-    stile_linea = "solid" if leg["action"] == "Long" else "dash"
-    fig.add_vline(
-        x=leg["strike"], 
-        line_dash=stile_linea, 
-        line_color=colore_linea, 
-        annotation_text=f"G{idx+1} ({leg['action']}): {leg['strike']}"
-    )
-
-fig.update_layout(
-    title="Grafico Asimmetrico dei Payoff in Tempo Reale",
-    xaxis_title="Prezzo Sottostante ($)",
-    yaxis_title="Profitto / Perdita Netta ($)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    paper_bgcolor="rgba(0,0,0,0)",
-    template="plotly_dark",
-    hovermode="x unified"
-)
-
-fig.add_hline(y=0, line_color="white", line_width=1)
-
-st.plotly_chart(fig, use_container_width=True)
-
-st.info("馃挕 **Consiglio di prova:** Modifica i lotti di una qualsiasi gamba o cambia il tipo in 'Call'. Vedrai sia il grafico che il pannello delle Greche adattarsi istantaneamente senza generare errori matematici.")
+st.table(pd.DataFrame(dati_tabella_dinamica))

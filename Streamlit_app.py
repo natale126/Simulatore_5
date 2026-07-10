@@ -1,158 +1,281 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
+import yfinance as yf
+import json
+import os
 import matplotlib.pyplot as plt
-from scipy.stats import norm
+import numpy as np
+import re
 
-# --- FORMULA DI BLACK-SCHOLES PER LE CALL ---
-def black_scholes_call(S, K, T, r, sigma):
-    if T <= 0:
-        return max(0.0, S - K)
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+# File di salvataggio del database locale
+FILE_DB = "opzioni_data.json"
 
-# --- CONFIGURAZIONE APPLICAZIONE ---
-st.set_page_config(page_title="Simulatore Realistico con Matrice", layout="wide")
-st.title("Simulatore Opzioni Avanzato: Algoritmo Trade Partner")
-st.write("Integrazione della matrice dei prezzi reali per eliminare le distorsioni sui payoff diagonali.")
+# --- GESTIONE DATABASE ---
+def load_data():
+    if not os.path.exists(FILE_DB):
+        return {}
+    with open(FILE_DB, 'r') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
 
-# --- SIDEBAR: DATI DEL SOTTOSTANTE E FUNZIONE MATRICE ---
-st.sidebar.header("1. Parametri di Mercato")
-S_attuale = st.sidebar.number_input("Prezzo Sottostante Attuale ($)", value=745.0, step=1.0)
-r = st.sidebar.number_input("Tasso d'Interesse (%)", value=4.0) / 100
+def save_data(data):
+    with open(FILE_DB, 'w') as f:
+        json.dump(data, f, indent=4)
 
-st.sidebar.markdown("---")
-st.sidebar.header("Algoritmo Speciale")
-# IL CUORE DEL NUOVO METODO: Spunta per attivare la protezione della matrice
-attiva_matrice = st.sidebar.checkbox("Attiva Matrice 'Trade Partner'", value=True, 
-                                     help="Se attivo, protegge le opzioni lunghe usando la matrice dei prezzi correnti, azzerando le finte perdite della valle.")
+# --- FUNZIONI UTILI ---
+def get_live_price(ticker):
+    """Recupera il prezzo attuale del sottostante o dell'opzione."""
+    try:
+        tk = yf.Ticker(ticker)
+        # Tenta prima con history per maggiore affidabilità sulle opzioni
+        hist = tk.history(period="1d")
+        if not hist.empty:
+            return float(hist['Close'].iloc[-1])
+        # Fallback sulle info veloci
+        return float(tk.fast_info['last_price'])
+    except Exception as e:
+        print(f"Errore nel recupero dati per {ticker}: {e}")
+        return 0.0
 
-# --- INSERIMENTO DATI DELLE 4 GAMBE ---
-st.header("2. Configurazione Iniziale delle Gambe")
-col1, col2, col3, col4 = st.columns(4)
-gambe = []
+def parse_option_symbol(symbol):
+    """Estrae Strike e Tipo (Call/Put) dal ticker standard OCC (es. AAPL240119C00150000)"""
+    # Regex per separare: Ticker(Lettere) Data(6 numeri) Tipo(C/P) Strike(8 numeri)
+    match = re.match(r'^([A-Za-z]+)(\d{6})([CPcp])(\d{8})$', symbol)
+    if match:
+        opt_type = match.group(3).upper()
+        strike_str = match.group(4)
+        strike = float(strike_str) / 1000.0
+        return opt_type, strike
+    return None, 0.0
 
-def input_gamba(col, id_gamba, default_strike, default_dte, default_premio, default_iv, default_tipo):
-    with col:
-        st.subheader(f"Gamba {id_gamba}")
-        tipo = st.selectbox(f"Azione G{id_gamba}", ["VENDUTA (Short)", "COMPRATA (Long)"], index=0 if default_tipo=="Short" else 1, key=f"t_{id_gamba}")
-        strike = st.number_input(f"Strike G{id_gamba}", value=default_strike, key=f"k_{id_gamba}")
-        dte_iniziale = st.number_input(f"DTE Iniziali G{id_gamba}", value=default_dte, key=f"d_{id_gamba}")
-        premio_apertura = st.number_input(f"Premio Apertura G{id_gamba}", value=default_premio, key=f"p_{id_gamba}")
-        iv_iniziale = st.number_input(f"IV Iniziale G{id_gamba} (%)", value=default_iv, key=f"i_{id_gamba}") / 100
+# --- CORE LOGIC ---
+def add_trade():
+    trades = load_data()
+    print("\n--- AGGIUNGI NUOVA STRATEGIA ---")
+    name = input("Nome della strategia (es. Iron Condor AAPL): ").strip()
+    if name in trades:
+        print("Errore: Esiste già una strategia con questo nome.")
+        return
+
+    ticker_base = input("Ticker sottostante (es. AAPL): ").strip().upper()
+    trades[name] = {"ticker": ticker_base, "legs": [], "status": "open"}
+    
+    while True:
+        print("\nInserimento Gamba (Leg):")
+        symbol = input("Ticker opzione yfinance (es. AAPL250117C00150000): ").strip().upper()
         
-        ppg_iniziale = premio_apertura / dte_iniziale if dte_iniziale > 0 else 0
-        st.metric("PPG Iniziale", f"{ppg_iniziale:.2f} $")
+        # Verifica se il formato è corretto
+        opt_type, strike = parse_option_symbol(symbol)
+        if opt_type is None:
+            print("Formato Ticker non riconosciuto. Procedere manualmente.")
+            opt_type = input("Tipo (C per Call, P per Put): ").strip().upper()
+            strike = float(input("Strike (es. 150.0): "))
+        else:
+            print(f"Rilevata: {opt_type} con Strike {strike}")
+
+        side = input("Side (long/short): ").strip().lower()
+        if side not in ['long', 'short']:
+            print("Side non valido. Usa 'long' o 'short'. Riprova.")
+            continue
+
+        try:
+            entry_price = float(input("Prezzo di carico (es. 2.50): "))
+            qty = int(input("Quantità contratti: "))
+        except ValueError:
+            print("Valore numerico non valido. Riprova.")
+            continue
+
+        leg = {
+            'symbol': symbol,
+            'type': opt_type,
+            'strike': strike,
+            'side': side,
+            'entry_price': entry_price,
+            'qty': qty
+        }
+        trades[name]['legs'].append(leg)
         
-        gambe.append({
-            "id": id_gamba,
-            "tipo_testo": "Short" if "VENDUTA" in tipo else "Long",
-            "tipo": -1 if "VENDUTA" in tipo else 1,
-            "strike": strike,
-            "dte_iniziale": dte_iniziale,
-            "premio_apertura": premio_apertura,
-            "iv_iniziale": iv_iniziale
-        })
-
-# Configurazione standard del tuo trade
-input_gamba(col1, 1, 746, 6, 5.04, 14.5, "Short")
-input_gamba(col2, 2, 751, 9, 3.69, 14.0, "Long")
-input_gamba(col3, 3, 751, 9, 3.69, 14.0, "Long")
-input_gamba(col4, 4, 755, 6, 1.02, 13.8, "Short")
-
-min_dte = min([g["dte_iniziale"] for g in gambe])
-
-# --- CURSORI INTERATTIVI ---
-st.header("3. Simulazione Dinamica")
-col_slide1, col_slide2, col_slide3 = st.columns(3)
-with col_slide1:
-    giorni_passati = st.slider("Giorni Trascorsi dall'apertura", min_value=0, max_value=9, value=0, step=1)
-with col_slide2:
-    shock_iv_breve = st.slider("Variazione IV Scadenze Brevi (%)", min_value=-15, max_value=15, value=0, step=1) / 100
-with col_slide3:
-    # Se la matrice è attiva, questo cursore viene disabilitato visivamente per farti capire che la matrice protegge il dato
-    if attiva_matrice:
-        st.slider("Variazione IV Scadenze Lunghe (%) [BLOCCATO DA MATRICE]", min_value=-15, max_value=15, value=0, disabled=True)
-        shock_iv_lunga = 0.0
-    else:
-        shock_iv_lunga = st.slider("Variazione IV Scadenze Lunghe (%) [Standard]", min_value=-15, max_value=15, value=0, step=1) / 100
-
-# --- MOTORE DI CALCOLO CON LOGICA MATRICE ---
-prezzi_target = np.linspace(S_attuale * 0.95, S_attuale * 1.05, 200)
-pnl_simulato = []
-dati_tabella_dinamica = []
-ppg_netto_simulato = 0.0
-
-for g in gambe:
-    dte_rimanenti = max(0, g["dte_iniziale"] - giorni_passati)
-    t_rimanente = dte_rimanenti / 365.0
+        if input("Aggiungere altra gamba? (s/n): ").lower() != 's':
+            break
     
-    # APPLICAZIONE DEL METODO TRADE PARTNER
-    if attiva_matrice:
-        if g["dte_iniziale"] == min_dte:
-            # Le scadenze brevi subiscono il mercato/decadimento normalmente
-            iv_simulata = max(0.01, g["iv_iniziale"] + shock_iv_breve)
+    save_data(trades)
+    print(f"\nStrategia '{name}' salvata con successo!")
+
+def monitor_trades():
+    trades = load_data()
+    open_trades = {k: v for k, v in trades.items() if v['status'] == "open"}
+    
+    if not open_trades:
+        print("\nNessuna strategia aperta al momento.")
+        return
+
+    print("\n--- STRATEGIE APERTE ---")
+    for idx, name in enumerate(open_trades.keys()):
+        print(f"{idx + 1}. {name}")
+    
+    choice = input("\nQuale strategia vuoi monitorare? (Inserisci il numero o '0' per tornare indietro): ")
+    try:
+        idx = int(choice) - 1
+        if idx == -1: return
+        name = list(open_trades.keys())[idx]
+    except (ValueError, IndexError):
+        print("Selezione non valida.")
+        return
+
+    data = trades[name]
+    print(f"\nSto scaricando i prezzi in tempo reale per {name}...")
+    
+    total_pnl = 0
+    price_base = get_live_price(data['ticker'])
+    
+    print(f"\n--- Sottostante {data['ticker']}: {price_base:.2f}$ ---")
+    
+    for leg in data['legs']:
+        current_price = get_live_price(leg['symbol'])
+        cost = leg['entry_price']
+        multiplier = 1 if leg['side'] == 'long' else -1
+        
+        # P&L in dollari per questa gamba = (Prezzo Attuale - Prezzo Ingresso) * 100 * Moltiplicatore * Qtà
+        leg_pnl = (current_price - cost) * 100 * multiplier * leg['qty']
+        total_pnl += leg_pnl
+        
+        print(f"Leg {leg['symbol']} ({leg['side']}): {current_price:.2f}$ | P&L: {leg_pnl:.2f}$")
+    
+    print("-" * 30)
+    print(f"P&L TOTALE 'AT NOW': {total_pnl:.2f}$")
+    
+    plot_strategy(data, price_base, total_pnl, name)
+
+def plot_strategy(data, current_underlying_price, current_pnl, name):
+    """Genera il grafico del payoff a scadenza e inserisce il marker 'At Now'."""
+    # Impostiamo il range del grafico (+/- 30% del prezzo attuale)
+    range_min = current_underlying_price * 0.7
+    range_max = current_underlying_price * 1.3
+    x = np.linspace(range_min, range_max, 500)
+    
+    y = np.zeros(len(x))
+    
+    for leg in data['legs']:
+        strike = leg['strike']
+        multiplier = 1 if leg['side'] == 'long' else -1
+        qty = leg['qty']
+        entry = leg['entry_price']
+        
+        if leg['type'] == 'C':
+            # Payoff = Max(0, Prezzo - Strike)
+            intrinsic = np.maximum(x - strike, 0)
         else:
-            # Le scadenze lunghe vengono 'specchiate' sulla matrice attuale. 
-            # Il loro valore a scadenza è stimato mantenendo la stabilità dei prezzi reali correnti.
-            iv_simulata = g["iv_iniziale"]
-    else:
-        # Metodo standard del broker (nessuna protezione)
-        iv_simulata = max(0.01, g["iv_iniziale"] + (shock_iv_breve if g["dte_iniziale"] == min_dte else shock_iv_lunga))
-    
-    prezzo_teorico_corrente = black_scholes_call(S_attuale, g["strike"], t_rimanente, r, iv_simulata)
-    ppg_dinamico = prezzo_teorico_corrente / dte_rimanenti if dte_rimanenti > 0 else 0.0
-    ppg_netto_simulato += ppg_dinamico * (-g["tipo"])
-    
-    pnl_singola_gamba_corrente = (prezzo_teorico_corrente - g["premio_apertura"]) * g["tipo"] * 100
-    
-    dati_tabella_dinamica.append({
-        "Gamba": f"G{g['id']} ({g['tipo_testo']})",
-        "Strike": g["strike"],
-        "DTE Residui": dte_rimanenti,
-        "Premio Simulato ($)": round(prezzo_teorico_corrente, 2),
-        "PPG Corrente ($/giorno)": round(ppg_dinamico, 2),
-        "P&L Attuale ($)": round(pnl_singola_gamba_corrente, 2)
-    })
-
-# Generazione curva Payoff
-for S_sim in prezzi_target:
-    pnl_totale_nodo = 0
-    for g in gambe:
-        dte_rimanenti = max(0, g["dte_iniziale"] - giorni_passati)
-        t_rimanente = dte_rimanenti / 365.0
-        if attiva_matrice:
-            iv_simulata = g["iv_iniziale"] if g["dte_iniziale"] != min_dte else max(0.01, g["iv_iniziale"] + shock_iv_breve)
-        else:
-            iv_simulata = max(0.01, g["iv_iniziale"] + (shock_iv_breve if g["dte_iniziale"] == min_dte else shock_iv_lunga))
+            # Payoff = Max(0, Strike - Prezzo)
+            intrinsic = np.maximum(strike - x, 0)
             
-        nuovo_prezzo = black_scholes_call(S_sim, g["strike"], t_rimanente, r, iv_simulata)
-        pnl_totale_nodo += (nuovo_prezzo - g["premio_apertura"]) * g["tipo"] * 100
-    pnl_simulato.append(pnl_totale_nodo)
+        # P&L a scadenza = (Valore Intrinseco - Costo Iniziale) se long
+        # P&L a scadenza = (Costo Iniziale - Valore Intrinseco) se short
+        if leg['side'] == 'long':
+            leg_payoff = (intrinsic - entry) * 100 * qty
+        else:
+            leg_payoff = (entry - intrinsic) * 100 * qty
+            
+        y += leg_payoff
 
-# --- GRAFICO DEL PAYOFF ---
-df_grafico = pd.DataFrame({"Prezzo Sottostante": prezzi_target, "P&L Reale ($)": pnl_simulato})
-fig, ax = plt.subplots(figsize=(10, 4))
-colore_linea = "#2ecc71" if df_grafico["P&L Reale ($)"].max() > 0 else "#e74c3c"
-ax.plot(df_grafico["Prezzo Sottostante"], df_grafico["P&L Reale ($)"], color=colore_linea, linewidth=2.5)
-ax.axhline(0, color="white", linestyle="--", alpha=0.5)
-ax.axvline(S_attuale, color="#f1c40f", linestyle=":", label=f"Prezzo Corrente ({S_attuale})")
-ax.set_ylabel("Profitto / Perdita ($)")
-ax.grid(True, alpha=0.2)
-ax.legend()
-plt.style.use('dark_background')
-fig.patch.set_facecolor('#0e1117')
-ax.set_facecolor('#0e1117')
-st.pyplot(fig)
+    plt.style.use('dark_background')
+    plt.figure(figsize=(10, 6))
+    
+    # Linea del payoff a scadenza
+    plt.plot(x, y, color='cyan', linewidth=2, label="Payoff a Scadenza (Teorico)")
+    
+    # Linea dello zero (Break-Even)
+    plt.axhline(0, color='gray', linestyle='--')
+    
+    # Linea verticale prezzo attuale
+    plt.axvline(current_underlying_price, color='red', linestyle=':', label=f"Prezzo Sottostante ({current_underlying_price:.2f}$)")
+    
+    # Marker "At Now"
+    color_at_now = 'lime' if current_pnl >= 0 else 'red'
+    plt.scatter(current_underlying_price, current_pnl, color=color_at_now, s=150, zorder=5, label=f"At Now P&L: {current_pnl:.2f}$")
+    
+    plt.title(f"Monitoraggio Strategia: {name}")
+    plt.xlabel(f"Prezzo {data['ticker']} ($)")
+    plt.ylabel("Profit / Loss ($)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
 
-# --- METRICHE E TABELLA ---
-st.header("4. Analisi del Profitto & PPG")
-m1, m2 = st.columns(2)
-with m1:
-    pnl_al_prezzo_attuale = df_grafico.iloc[(df_grafico['Prezzo Sottostante']-S_attuale).abs().argsort()[:1]]["P&L Reale ($)"].values[0]
-    st.metric("P&L della Posizione", f"{pnl_al_prezzo_attuale:,.2f} $")
-with m2:
-    st.metric("PPG NETTO della Strategia", f"{ppg_netto_simulato * 100:+.2f} $ / giorno")
+def close_trade():
+    trades = load_data()
+    open_trades = {k: v for k, v in trades.items() if v['status'] == "open"}
+    
+    if not open_trades:
+        print("\nNessuna strategia aperta da chiudere.")
+        return
 
-st.table(pd.DataFrame(dati_tabella_dinamica))
+    print("\n--- CHIUDI STRATEGIA ---")
+    for idx, name in enumerate(open_trades.keys()):
+        print(f"{idx + 1}. {name}")
+        
+    choice = input("\nQuale strategia vuoi chiudere? (0 per annullare): ")
+    try:
+        idx = int(choice) - 1
+        if idx == -1: return
+        name = list(open_trades.keys())[idx]
+        trades[name]['status'] = 'closed'
+        save_data(trades)
+        print(f"Strategia '{name}' spostata nello storico (Chiuse).")
+    except (ValueError, IndexError):
+        print("Selezione non valida.")
+
+def delete_trade():
+    trades = load_data()
+    if not trades:
+        print("\nNessuna strategia in memoria.")
+        return
+
+    print("\n--- ELIMINA STRATEGIA ---")
+    for idx, name in enumerate(trades.keys()):
+        stato = "APERTA" if trades[name]['status'] == 'open' else "CHIUSA"
+        print(f"{idx + 1}. {name} [{stato}]")
+        
+    choice = input("\nQuale strategia vuoi ELIMINARE definitivamente? (0 per annullare): ")
+    try:
+        idx = int(choice) - 1
+        if idx == -1: return
+        name = list(trades.keys())[idx]
+        
+        conferma = input(f"Sei sicuro di voler eliminare '{name}' per sempre? (s/n): ")
+        if conferma.lower() == 's':
+            del trades[name]
+            save_data(trades)
+            print("Strategia eliminata.")
+    except (ValueError, IndexError):
+        print("Selezione non valida.")
+
+# --- MENU PRINCIPALE ---
+def main_menu():
+    while True:
+        print("\n" + "="*30)
+        print("   OPTIONS TRACKER AT-NOW")
+        print("="*30)
+        print("1. Aggiungi Strategia")
+        print("2. Monitora Strategia Attiva (Payoff & At-Now)")
+        print("3. Chiudi Strategia (Sposta in storico)")
+        print("4. Elimina Strategia Definitivamente")
+        print("5. Esci")
+        print("="*30)
+        
+        choice = input("Seleziona un'opzione: ")
+        
+        if choice == '1':
+            add_trade()
+        elif choice == '2':
+            monitor_trades()
+        elif choice == '3':
+            close_trade()
+        elif choice == '4':
+            delete_trade()
+        elif choice == '5':
+            print("Chiusura programma. A presto!")
+            break
+        else:
+            print("Scelta non valida, riprova.")
+
+if __name__ == "__main__":
+    main_menu()

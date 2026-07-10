@@ -74,9 +74,9 @@ with tab_build:
                 calls = chain.calls
                 puts = chain.puts
                 
-                # Calcolo del Prezzo Medio (Mid Price) arrotondato a 2 decimali
-                calls['Prezzo Medio (Mid)'] = ((calls['bid'] + calls['ask']) / 2).round(2)
-                puts['Prezzo Medio (Mid)'] = ((puts['bid'] + puts['ask']) / 2).round(2)
+                # Calcolo del Prezzo Medio (Mid Price) gestendo eventuali valori vuoti
+                calls['Prezzo Medio (Mid)'] = ((calls['bid'].fillna(0) + calls['ask'].fillna(0)) / 2).round(2)
+                puts['Prezzo Medio (Mid)'] = ((puts['bid'].fillna(0) + puts['ask'].fillna(0)) / 2).round(2)
             
             # Mostra le chain in due colonne
             col_calls, col_puts = st.columns(2)
@@ -89,41 +89,48 @@ with tab_build:
 
             st.divider()
             st.header("3. Componi la Strategia")
+            st.write("Aggiungi una gamba alla tua posizione:")
             
-            # Form di aggiunta gamba
-            with st.form("add_leg_form", clear_on_submit=False):
-                st.write("Aggiungi una gamba alla tua posizione:")
-                c1, c2, c3, c4, c5 = st.columns(5)
-                
-                with c1:
-                    opt_type = st.selectbox("Tipo", ["Call", "Put"])
-                with c2:
-                    # Filtra gli strike in base alla scelta Call/Put per il menu a tendina
-                    available_strikes = calls['strike'].tolist() if opt_type == "Call" else puts['strike'].tolist()
-                    strike = st.selectbox("Strike", available_strikes)
-                with c3:
-                    side = st.selectbox("Side", ["Long", "Short"])
-                with c4:
-                    qty = st.number_input("Quantità", min_value=1, value=1, step=1)
-                with c5:
-                    entry_price = st.number_input("Prezzo (Credit/Debit)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
-                
-                submitted = st.form_submit_button("➕ Aggiungi Gamba")
-                if submitted:
-                    # Recupera l'OCC symbol esatto dal dataframe
-                    df_target = calls if opt_type == "Call" else puts
-                    occ_symbol = df_target[df_target['strike'] == strike]['contractSymbol'].values[0]
-                    
-                    st.session_state.st_legs.append({
-                        "symbol": occ_symbol,
-                        "type": "C" if opt_type == "Call" else "P",
-                        "strike": float(strike),
-                        "side": side.lower(),
-                        "qty": int(qty),
-                        "entry_price": float(entry_price)
-                    })
-                    st.success(f"Gamba aggiunta: {side} {opt_type} {strike}")
+            # Interfaccia dinamica (senza st.form per permettere l'aggiornamento live)
+            c1, c2, c3, c4, c5 = st.columns(5)
             
+            with c1:
+                opt_type = st.selectbox("Tipo", ["Call", "Put"])
+            with c2:
+                # Filtra gli strike in base alla scelta Call/Put per il menu a tendina
+                available_strikes = calls['strike'].tolist() if opt_type == "Call" else puts['strike'].tolist()
+                strike = st.selectbox("Strike", available_strikes)
+                
+            # Recupero dinamico del Mid Price basato sullo Strike e Tipo selezionati
+            df_target = calls if opt_type == "Call" else puts
+            try:
+                mid_price_value = float(df_target[df_target['strike'] == strike]['Prezzo Medio (Mid)'].values[0])
+            except:
+                mid_price_value = 0.0
+
+            with c3:
+                side = st.selectbox("Side", ["Long", "Short"])
+            with c4:
+                qty = st.number_input("Quantità", min_value=1, value=1, step=1)
+            with c5:
+                # Il valore di default è ora precompilato con il Mid Price
+                entry_price = st.number_input("Prezzo (Credit/Debit)", min_value=0.0, value=mid_price_value, step=0.01, format="%.2f")
+            
+            if st.button("➕ Aggiungi Gamba"):
+                occ_symbol = df_target[df_target['strike'] == strike]['contractSymbol'].values[0]
+                
+                st.session_state.st_legs.append({
+                    "symbol": occ_symbol,
+                    "type": "C" if opt_type == "Call" else "P",
+                    "strike": float(strike),
+                    "side": side.lower(),
+                    "qty": int(qty),
+                    "entry_price": float(entry_price)
+                })
+                st.success(f"Gamba aggiunta: {side} {opt_type} {strike}")
+                st.rerun()
+            
+            st.write("---")
             # Mostra le gambe attuali e il tasto per salvare
             if len(st.session_state.st_legs) > 0:
                 st.subheader("Gambe in canna (Pronto per l'avvio):")
@@ -132,7 +139,6 @@ with tab_build:
                 
                 if st.button("🚀 AVVIA STRATEGIA", type="primary"):
                     trades = load_data()
-                    # Nome autogenerato
                     strategy_id = f"{ticker_input}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     
                     trades[strategy_id] = {
@@ -161,7 +167,6 @@ with tab_monitor:
         st.info("Nessuna strategia attiva. Usa il tab 'Costruisci Strategia' per avviarne una.")
     else:
         st.header("Seleziona la Strategia da Monitorare")
-        # Mostra in tendina il Ticker e la data di apertura
         options_list = list(open_trades.keys())
         format_func = lambda x: f"{open_trades[x]['ticker']} (Avviata il {open_trades[x]['date_opened']})"
         selected_trade_id = st.selectbox("Strategie Aperte:", options_list, format_func=format_func)
@@ -178,7 +183,6 @@ with tab_monitor:
                     st.subheader(f"Sottostante: {ticker_base} a {price_base:.2f}$")
                     total_pnl = 0
                     
-                    # Tabella riassuntiva live
                     st.write("**Dettaglio Gambe & P&L:**")
                     for leg in data['legs']:
                         current_price = get_live_price(leg['symbol'])
@@ -226,7 +230,6 @@ with tab_monitor:
                     ax.axhline(0, color='white', linestyle='--', linewidth=0.8)
                     ax.axvline(price_base, color='#ff4b4b', linestyle=':', label=f"Prezzo Attuale ({price_base:.2f}$)")
                     
-                    # Marker At-Now
                     marker_color = '#00ff00' if total_pnl >= 0 else '#ff0000'
                     ax.scatter(price_base, total_pnl, color=marker_color, s=150, zorder=5, label=f"At Now P&L")
                     

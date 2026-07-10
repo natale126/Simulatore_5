@@ -1,3 +1,5 @@
+```python
+import streamlit as st
 import yfinance as yf
 import json
 import os
@@ -23,23 +25,18 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 # --- FUNZIONI UTILI ---
+@st.cache_data(ttl=60) # Cacha i prezzi per 60 secondi per non sovraccaricare yfinance
 def get_live_price(ticker):
-    """Recupera il prezzo attuale del sottostante o dell'opzione."""
     try:
         tk = yf.Ticker(ticker)
-        # Tenta prima con history per maggiore affidabilità sulle opzioni
         hist = tk.history(period="1d")
         if not hist.empty:
             return float(hist['Close'].iloc[-1])
-        # Fallback sulle info veloci
         return float(tk.fast_info['last_price'])
-    except Exception as e:
-        print(f"Errore nel recupero dati per {ticker}: {e}")
+    except Exception:
         return 0.0
 
 def parse_option_symbol(symbol):
-    """Estrae Strike e Tipo (Call/Put) dal ticker standard OCC (es. AAPL240119C00150000)"""
-    # Regex per separare: Ticker(Lettere) Data(6 numeri) Tipo(C/P) Strike(8 numeri)
     match = re.match(r'^([A-Za-z]+)(\d{6})([CPcp])(\d{8})$', symbol)
     if match:
         opt_type = match.group(3).upper()
@@ -48,111 +45,10 @@ def parse_option_symbol(symbol):
         return opt_type, strike
     return None, 0.0
 
-# --- CORE LOGIC ---
-def add_trade():
-    trades = load_data()
-    print("\n--- AGGIUNGI NUOVA STRATEGIA ---")
-    name = input("Nome della strategia (es. Iron Condor AAPL): ").strip()
-    if name in trades:
-        print("Errore: Esiste già una strategia con questo nome.")
-        return
-
-    ticker_base = input("Ticker sottostante (es. AAPL): ").strip().upper()
-    trades[name] = {"ticker": ticker_base, "legs": [], "status": "open"}
-    
-    while True:
-        print("\nInserimento Gamba (Leg):")
-        symbol = input("Ticker opzione yfinance (es. AAPL250117C00150000): ").strip().upper()
-        
-        # Verifica se il formato è corretto
-        opt_type, strike = parse_option_symbol(symbol)
-        if opt_type is None:
-            print("Formato Ticker non riconosciuto. Procedere manualmente.")
-            opt_type = input("Tipo (C per Call, P per Put): ").strip().upper()
-            strike = float(input("Strike (es. 150.0): "))
-        else:
-            print(f"Rilevata: {opt_type} con Strike {strike}")
-
-        side = input("Side (long/short): ").strip().lower()
-        if side not in ['long', 'short']:
-            print("Side non valido. Usa 'long' o 'short'. Riprova.")
-            continue
-
-        try:
-            entry_price = float(input("Prezzo di carico (es. 2.50): "))
-            qty = int(input("Quantità contratti: "))
-        except ValueError:
-            print("Valore numerico non valido. Riprova.")
-            continue
-
-        leg = {
-            'symbol': symbol,
-            'type': opt_type,
-            'strike': strike,
-            'side': side,
-            'entry_price': entry_price,
-            'qty': qty
-        }
-        trades[name]['legs'].append(leg)
-        
-        if input("Aggiungere altra gamba? (s/n): ").lower() != 's':
-            break
-    
-    save_data(trades)
-    print(f"\nStrategia '{name}' salvata con successo!")
-
-def monitor_trades():
-    trades = load_data()
-    open_trades = {k: v for k, v in trades.items() if v['status'] == "open"}
-    
-    if not open_trades:
-        print("\nNessuna strategia aperta al momento.")
-        return
-
-    print("\n--- STRATEGIE APERTE ---")
-    for idx, name in enumerate(open_trades.keys()):
-        print(f"{idx + 1}. {name}")
-    
-    choice = input("\nQuale strategia vuoi monitorare? (Inserisci il numero o '0' per tornare indietro): ")
-    try:
-        idx = int(choice) - 1
-        if idx == -1: return
-        name = list(open_trades.keys())[idx]
-    except (ValueError, IndexError):
-        print("Selezione non valida.")
-        return
-
-    data = trades[name]
-    print(f"\nSto scaricando i prezzi in tempo reale per {name}...")
-    
-    total_pnl = 0
-    price_base = get_live_price(data['ticker'])
-    
-    print(f"\n--- Sottostante {data['ticker']}: {price_base:.2f}$ ---")
-    
-    for leg in data['legs']:
-        current_price = get_live_price(leg['symbol'])
-        cost = leg['entry_price']
-        multiplier = 1 if leg['side'] == 'long' else -1
-        
-        # P&L in dollari per questa gamba = (Prezzo Attuale - Prezzo Ingresso) * 100 * Moltiplicatore * Qtà
-        leg_pnl = (current_price - cost) * 100 * multiplier * leg['qty']
-        total_pnl += leg_pnl
-        
-        print(f"Leg {leg['symbol']} ({leg['side']}): {current_price:.2f}$ | P&L: {leg_pnl:.2f}$")
-    
-    print("-" * 30)
-    print(f"P&L TOTALE 'AT NOW': {total_pnl:.2f}$")
-    
-    plot_strategy(data, price_base, total_pnl, name)
-
 def plot_strategy(data, current_underlying_price, current_pnl, name):
-    """Genera il grafico del payoff a scadenza e inserisce il marker 'At Now'."""
-    # Impostiamo il range del grafico (+/- 30% del prezzo attuale)
     range_min = current_underlying_price * 0.7
     range_max = current_underlying_price * 1.3
     x = np.linspace(range_min, range_max, 500)
-    
     y = np.zeros(len(x))
     
     for leg in data['legs']:
@@ -162,14 +58,10 @@ def plot_strategy(data, current_underlying_price, current_pnl, name):
         entry = leg['entry_price']
         
         if leg['type'] == 'C':
-            # Payoff = Max(0, Prezzo - Strike)
             intrinsic = np.maximum(x - strike, 0)
         else:
-            # Payoff = Max(0, Strike - Prezzo)
             intrinsic = np.maximum(strike - x, 0)
             
-        # P&L a scadenza = (Valore Intrinseco - Costo Iniziale) se long
-        # P&L a scadenza = (Costo Iniziale - Valore Intrinseco) se short
         if leg['side'] == 'long':
             leg_payoff = (intrinsic - entry) * 100 * qty
         else:
@@ -178,104 +70,149 @@ def plot_strategy(data, current_underlying_price, current_pnl, name):
         y += leg_payoff
 
     plt.style.use('dark_background')
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Linea del payoff a scadenza
-    plt.plot(x, y, color='cyan', linewidth=2, label="Payoff a Scadenza (Teorico)")
+    ax.plot(x, y, color='cyan', linewidth=2, label="Payoff a Scadenza (Teorico)")
+    ax.axhline(0, color='gray', linestyle='--')
+    ax.axvline(current_underlying_price, color='red', linestyle=':', label=f"Prezzo Sottostante ({current_underlying_price:.2f}$)")
     
-    # Linea dello zero (Break-Even)
-    plt.axhline(0, color='gray', linestyle='--')
-    
-    # Linea verticale prezzo attuale
-    plt.axvline(current_underlying_price, color='red', linestyle=':', label=f"Prezzo Sottostante ({current_underlying_price:.2f}$)")
-    
-    # Marker "At Now"
     color_at_now = 'lime' if current_pnl >= 0 else 'red'
-    plt.scatter(current_underlying_price, current_pnl, color=color_at_now, s=150, zorder=5, label=f"At Now P&L: {current_pnl:.2f}$")
+    ax.scatter(current_underlying_price, current_pnl, color=color_at_now, s=150, zorder=5, label=f"At Now P&L: {current_pnl:.2f}$")
     
-    plt.title(f"Monitoraggio Strategia: {name}")
-    plt.xlabel(f"Prezzo {data['ticker']} ($)")
-    plt.ylabel("Profit / Loss ($)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.show()
+    ax.set_title(f"Monitoraggio Strategia: {name}")
+    ax.set_xlabel(f"Prezzo {data['ticker']} ($)")
+    ax.set_ylabel("Profit / Loss ($)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    return fig
 
-def close_trade():
+# --- CONFIGURAZIONE INTERFACCIA STREAMLIT ---
+st.set_page_config(page_title="Options Tracker", layout="wide", page_icon="📈")
+st.title("📈 Options Tracker At-Now")
+
+# Menu Laterale
+menu = st.sidebar.radio("Navigazione", ["Monitora Strategie", "Aggiungi Strategia", "Gestisci Storico"])
+
+if menu == "Aggiungi Strategia":
+    st.header("Nuova Strategia")
+    
+    with st.form("add_trade_form"):
+        name = st.text_input("Nome della strategia (es. Iron Condor AAPL)")
+        ticker_base = st.text_input("Ticker sottostante (es. AAPL)").upper()
+        
+        st.subheader("Gambe della Strategia (Compila fino a 4)")
+        legs_data = []
+        
+        for i in range(4):
+            st.markdown(f"**Gamba {i+1}**")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                sym = st.text_input(f"Ticker Opzione (es. AAPL250117C00150000)", key=f"sym_{i}").upper()
+            with col2:
+                side = st.selectbox(f"Side", ["", "long", "short"], key=f"side_{i}")
+            with col3:
+                price = st.number_input(f"Prezzo Carico ($)", min_value=0.0, step=0.01, key=f"prc_{i}")
+            with col4:
+                qty = st.number_input(f"Quantità", min_value=0, step=1, key=f"qty_{i}")
+                
+            legs_data.append({"sym": sym, "side": side, "price": price, "qty": qty})
+            
+        submit = st.form_submit_button("Salva Strategia")
+        
+        if submit:
+            if not name or not ticker_base:
+                st.error("Inserisci il Nome e il Ticker sottostante.")
+            else:
+                trades = load_data()
+                if name in trades:
+                    st.error("Una strategia con questo nome esiste già.")
+                else:
+                    valid_legs = []
+                    for leg in legs_data:
+                        if leg['sym'] and leg['side'] and leg['qty'] > 0:
+                            opt_type, strike = parse_option_symbol(leg['sym'])
+                            if opt_type:
+                                valid_legs.append({
+                                    'symbol': leg['sym'],
+                                    'type': opt_type,
+                                    'strike': strike,
+                                    'side': leg['side'],
+                                    'entry_price': leg['price'],
+                                    'qty': leg['qty']
+                                })
+                            else:
+                                st.warning(f"Formato ticker non riconosciuto: {leg['sym']}")
+                    
+                    if valid_legs:
+                        trades[name] = {"ticker": ticker_base, "legs": valid_legs, "status": "open"}
+                        save_data(trades)
+                        st.success(f"Strategia '{name}' salvata con {len(valid_legs)} gambe!")
+                    else:
+                        st.error("Devi inserire correttamente almeno una gamba (Ticker, Side e Quantità > 0).")
+
+elif menu == "Monitora Strategie":
     trades = load_data()
-    open_trades = {k: v for k, v in trades.items() if v['status'] == "open"}
+    open_trades = {k: v for k, v in trades.items() if v['status'] == 'open'}
     
     if not open_trades:
-        print("\nNessuna strategia aperta da chiudere.")
-        return
-
-    print("\n--- CHIUDI STRATEGIA ---")
-    for idx, name in enumerate(open_trades.keys()):
-        print(f"{idx + 1}. {name}")
+        st.info("Nessuna strategia attiva trovata. Vai su 'Aggiungi Strategia' per iniziare.")
+    else:
+        selected_strat = st.selectbox("Seleziona la strategia da monitorare:", list(open_trades.keys()))
         
-    choice = input("\nQuale strategia vuoi chiudere? (0 per annullare): ")
-    try:
-        idx = int(choice) - 1
-        if idx == -1: return
-        name = list(open_trades.keys())[idx]
-        trades[name]['status'] = 'closed'
-        save_data(trades)
-        print(f"Strategia '{name}' spostata nello storico (Chiuse).")
-    except (ValueError, IndexError):
-        print("Selezione non valida.")
+        if st.button("Aggiorna Dati Live"):
+            data = open_trades[selected_strat]
+            
+            with st.spinner("Scaricamento prezzi da Yahoo Finance in corso..."):
+                price_base = get_live_price(data['ticker'])
+                st.subheader(f"Sottostante {data['ticker']}: ${price_base:.2f}")
+                
+                total_pnl = 0
+                
+                for leg in data['legs']:
+                    curr_price = get_live_price(leg['symbol'])
+                    cost = leg['entry_price']
+                    multiplier = 1 if leg['side'] == 'long' else -1
+                    
+                    leg_pnl = (curr_price - cost) * 100 * multiplier * leg['qty']
+                    total_pnl += leg_pnl
+                    
+                    # Colore dinamico per il profitto della singola gamba
+                    pnl_color = "green" if leg_pnl >= 0 else "red"
+                    st.markdown(f"- **{leg['symbol']}** ({leg['side']}): Prezzo Attuale **${curr_price:.2f}** | P&L: <span style='color:{pnl_color}'>**${leg_pnl:.2f}**</span>", unsafe_allow_html=True)
+                
+                st.divider()
+                pnl_color_tot = "green" if total_pnl >= 0 else "red"
+                st.markdown(f"### P&L TOTALE 'AT NOW': <span style='color:{pnl_color_tot}'>${total_pnl:.2f}</span>", unsafe_allow_html=True)
+                
+                # Renderizza il grafico in Streamlit
+                fig = plot_strategy(data, price_base, total_pnl, selected_strat)
+                st.pyplot(fig)
 
-def delete_trade():
+elif menu == "Gestisci Storico":
+    st.header("Gestione Strategie")
     trades = load_data()
+    
     if not trades:
-        print("\nNessuna strategia in memoria.")
-        return
-
-    print("\n--- ELIMINA STRATEGIA ---")
-    for idx, name in enumerate(trades.keys()):
-        stato = "APERTA" if trades[name]['status'] == 'open' else "CHIUSA"
-        print(f"{idx + 1}. {name} [{stato}]")
-        
-    choice = input("\nQuale strategia vuoi ELIMINARE definitivamente? (0 per annullare): ")
-    try:
-        idx = int(choice) - 1
-        if idx == -1: return
-        name = list(trades.keys())[idx]
-        
-        conferma = input(f"Sei sicuro di voler eliminare '{name}' per sempre? (s/n): ")
-        if conferma.lower() == 's':
-            del trades[name]
+        st.info("Nessuna strategia in memoria.")
+    else:
+        open_trades = [k for k, v in trades.items() if v['status'] == 'open']
+        if open_trades:
+            st.subheader("Chiudi Strategia (Sposta nello storico)")
+            strat_to_close = st.selectbox("Seleziona strategia da chiudere:", open_trades)
+            if st.button("Archivia Strategia"):
+                trades[strat_to_close]['status'] = 'closed'
+                save_data(trades)
+                st.success(f"Strategia {strat_to_close} chiusa e archiviata!")
+                st.rerun()
+                
+        st.divider()
+        st.subheader("Elimina Definitivamente")
+        strat_to_delete = st.selectbox("Seleziona strategia da eliminare (Attive e Chiuse):", list(trades.keys()))
+        if st.button("Elimina per sempre"):
+            del trades[strat_to_delete]
             save_data(trades)
-            print("Strategia eliminata.")
-    except (ValueError, IndexError):
-        print("Selezione non valida.")
+            st.success(f"Strategia {strat_to_delete} eliminata dal database!")
+            st.rerun()
 
-# --- MENU PRINCIPALE ---
-def main_menu():
-    while True:
-        print("\n" + "="*30)
-        print("   OPTIONS TRACKER AT-NOW")
-        print("="*30)
-        print("1. Aggiungi Strategia")
-        print("2. Monitora Strategia Attiva (Payoff & At-Now)")
-        print("3. Chiudi Strategia (Sposta in storico)")
-        print("4. Elimina Strategia Definitivamente")
-        print("5. Esci")
-        print("="*30)
-        
-        choice = input("Seleziona un'opzione: ")
-        
-        if choice == '1':
-            add_trade()
-        elif choice == '2':
-            monitor_trades()
-        elif choice == '3':
-            close_trade()
-        elif choice == '4':
-            delete_trade()
-        elif choice == '5':
-            print("Chiusura programma. A presto!")
-            break
-        else:
-            print("Scelta non valida, riprova.")
-
-if __name__ == "__main__":
-    main_menu()
+```

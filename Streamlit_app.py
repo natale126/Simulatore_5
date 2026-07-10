@@ -73,15 +73,19 @@ with tab_build:
                 chain = tk.option_chain(selected_date)
                 calls = chain.calls
                 puts = chain.puts
+                
+                # Calcolo del Prezzo Medio (Mid Price) arrotondato a 2 decimali
+                calls['Prezzo Medio (Mid)'] = ((calls['bid'] + calls['ask']) / 2).round(2)
+                puts['Prezzo Medio (Mid)'] = ((puts['bid'] + puts['ask']) / 2).round(2)
             
             # Mostra le chain in due colonne
             col_calls, col_puts = st.columns(2)
             with col_calls:
                 st.subheader("🟢 CALLS")
-                st.dataframe(calls[['strike', 'lastPrice', 'bid', 'ask', 'volume']], use_container_width=True, hide_index=True)
+                st.dataframe(calls[['strike', 'lastPrice', 'bid', 'ask', 'Prezzo Medio (Mid)', 'volume']], use_container_width=True, hide_index=True)
             with col_puts:
                 st.subheader("🔴 PUTS")
-                st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'volume']], use_container_width=True, hide_index=True)
+                st.dataframe(puts[['strike', 'lastPrice', 'bid', 'ask', 'Prezzo Medio (Mid)', 'volume']], use_container_width=True, hide_index=True)
 
             st.divider()
             st.header("3. Componi la Strategia")
@@ -128,7 +132,7 @@ with tab_build:
                 
                 if st.button("🚀 AVVIA STRATEGIA", type="primary"):
                     trades = load_data()
-                    # Nome autogenerato per non doverlo chiedere all'utente
+                    # Nome autogenerato
                     strategy_id = f"{ticker_input}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     
                     trades[strategy_id] = {
@@ -139,7 +143,7 @@ with tab_build:
                     }
                     save_data(trades)
                     st.session_state.st_legs = [] # Svuota la memoria temporanea
-                    st.success(f"Strategia avviata con successo! (ID: {strategy_id}) Vai al tab 'Monitoraggio'.")
+                    st.success(f"Strategia avviata con successo! Vai al tab 'Monitoraggio Attive'.")
                     st.rerun()
                 
                 if st.button("🗑️ Svuota Gambe"):
@@ -157,7 +161,7 @@ with tab_monitor:
         st.info("Nessuna strategia attiva. Usa il tab 'Costruisci Strategia' per avviarne una.")
     else:
         st.header("Seleziona la Strategia da Monitorare")
-        # Mostra in tendina il Ticker e la data di apertura al posto del nome inventato
+        # Mostra in tendina il Ticker e la data di apertura
         options_list = list(open_trades.keys())
         format_func = lambda x: f"{open_trades[x]['ticker']} (Avviata il {open_trades[x]['date_opened']})"
         selected_trade_id = st.selectbox("Strategie Aperte:", options_list, format_func=format_func)
@@ -215,7 +219,7 @@ with tab_monitor:
                             y += (entry - intrinsic) * 100 * qty
 
                     fig, ax = plt.subplots(figsize=(10, 5))
-                    fig.patch.set_facecolor('#0e1117') # Colore scuro Streamlit
+                    fig.patch.set_facecolor('#0e1117') 
                     ax.set_facecolor('#0e1117')
                     
                     ax.plot(x, y, color='#00d4ff', linewidth=2, label="Payoff a Scadenza")

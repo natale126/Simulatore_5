@@ -214,4 +214,4 @@ elif menu == "Gestisci Storico":
             st.success(f"Strategia {strat_to_delete} eliminata dal database!")
             st.rerun()
 
-```
+

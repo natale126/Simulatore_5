@@ -19,10 +19,10 @@ def norm_cdf(x):
 
 def bs_price(S, K, T, r, sigma, opt_type):
     """Calcola il prezzo teorico dell'opzione usando Black-Scholes"""
-    if T <= 0: # Se l'opzione è già scaduta, ritorna il valore intrinseco puro
+    if T <= 0.001: # Se l'opzione è scaduta o scade oggi, ritorna il valore intrinseco puro
         return max(0.0, S - K) if opt_type == 'C' else max(0.0, K - S)
     if sigma <= 0:
-        sigma = 0.001 # Previene divisioni per zero se la volatilità manca
+        sigma = 0.001
     
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
@@ -118,7 +118,6 @@ with tab_build:
             try: mid_price_value = float(df_target[df_target['strike'] == strike]['Prezzo Medio (Mid)'].values[0])
             except: mid_price_value = 0.0
             
-            # Estraiamo anche l'IV per il modello di Black-Scholes
             try: iv_value = float(df_target[df_target['strike'] == strike]['impliedVolatility'].values[0])
             except: iv_value = 0.3
 
@@ -135,8 +134,8 @@ with tab_build:
                     "side": side.lower(),
                     "qty": int(qty),
                     "entry_price": float(entry_price),
-                    "expiration": selected_date, # Salviamo la scadenza per calcolare il DTE!
-                    "iv": float(iv_value) # Salviamo l'IV per la simulazione
+                    "expiration": selected_date,
+                    "iv": float(iv_value)
                 })
                 st.success(f"Gamba aggiunta: {side} {opt_type} {strike} (Scadenza: {selected_date})")
                 st.rerun()
@@ -166,7 +165,7 @@ with tab_build:
                     st.rerun()
 
 # ==========================================
-# TAB 2: MONITORAGGIO AT-NOW (CON SWITCH)
+# TAB 2: MONITORAGGIO AT-NOW (CON SWITCH E SLIDER)
 # ==========================================
 with tab_monitor:
     trades = load_data()
@@ -182,15 +181,30 @@ with tab_monitor:
             options_list = list(open_trades.keys())
             format_func = lambda x: f"{open_trades[x]['ticker']} (Avviata: {open_trades[x]['date_opened']})"
             selected_trade_id = st.selectbox("Seleziona Strategia:", options_list, format_func=format_func)
+        
         with c_tog:
-            st.write(" ") # Spaziatura
             st.write(" ")
-            # Lo Switch per cambiare tipo di curva
-            chart_type = st.radio("Visualizzazione Curva:", ["Payoff a Scadenza (Teorico)", "Curva T+0 (Simulazione Oggi)"], horizontal=True)
+            st.write(" ")
+            chart_type = st.radio("Visualizzazione Curva:", ["Payoff a Scadenza (Teorico)", "Curva Dinamica (Simulatore T+0 / T+x)"], horizontal=True)
             
         if selected_trade_id:
             data = open_trades[selected_trade_id]
             ticker_base = data['ticker']
+            today = datetime.now()
+            
+            # Calcola DTE massimo per lo slider
+            max_dte = 0
+            for leg in data['legs']:
+                exp_date_str = leg.get('expiration', today.strftime('%Y-%m-%d'))
+                try: exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d')
+                except: exp_date = today
+                dte = (exp_date - today).days
+                if dte > max_dte: max_dte = dte
+            max_dte = max(1, max_dte) # Per evitare errori nello slider se scade oggi
+            
+            days_forward = 0
+            if chart_type == "Curva Dinamica (Simulatore T+0 / T+x)":
+                days_forward = st.slider("⏳ Macchina del Tempo (Simula passaggio dei giorni):", min_value=0, max_value=max_dte, value=0, step=1)
             
             st.write("---")
             if st.button("🔄 Aggiorna Prezzi Live"):
@@ -221,10 +235,10 @@ with tab_monitor:
                     range_min = price_base * 0.85
                     range_max = price_base * 1.15
                     x = np.linspace(range_min, range_max, 400)
-                    y = np.zeros(len(x))
+                    y_base = np.zeros(len(x))
+                    y_sim = np.zeros(len(x))
                     
-                    today = datetime.now()
-                    risk_free_rate = 0.04 # 4% stimato
+                    risk_free_rate = 0.04
                     
                     for leg in data['legs']:
                         strike = leg['strike']
@@ -233,52 +247,69 @@ with tab_monitor:
                         entry = leg['entry_price']
                         
                         if chart_type == "Payoff a Scadenza (Teorico)":
-                            # Calcolo Intrinseco Puro
                             if leg['type'] == 'C': intrinsic = np.maximum(x - strike, 0)
                             else: intrinsic = np.maximum(strike - x, 0)
                                 
-                            if leg['side'] == 'long': y += (intrinsic - entry) * 100 * qty
-                            else: y += (entry - intrinsic) * 100 * qty
+                            if leg['side'] == 'long': y_base += (intrinsic - entry) * 100 * qty
+                            else: y_base += (entry - intrinsic) * 100 * qty
                         
                         else:
-                            # Calcolo Curva T+0 usando Black-Scholes
                             exp_date_str = leg.get('expiration', today.strftime('%Y-%m-%d'))
                             try: exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d')
                             except: exp_date = today
                             
-                            # Calcolo DTE (Days to Expiration)
-                            dte = (exp_date - today).days
-                            T = max(0.001, dte / 365.0) # Tempo espresso in anni per Black-Scholes
-                            iv = leg.get('iv', 0.3) # Se l'IV manca (vecchi trade), usa 30% di default
+                            dte = max(0, (exp_date - today).days)
+                            T_t0 = max(0.001, dte / 365.0)
                             
-                            leg_y = np.zeros(len(x))
+                            sim_dte = max(0, dte - days_forward)
+                            T_sim = max(0.000, sim_dte / 365.0)
+                            
+                            iv = leg.get('iv', 0.3)
+                            
+                            leg_y_base = np.zeros(len(x))
+                            leg_y_sim = np.zeros(len(x))
+                            
                             for i, S in enumerate(x):
-                                sim_price = bs_price(S, strike, T, risk_free_rate, iv, leg['type'])
+                                # Calcolo T+0 (Oggi)
+                                price_t0 = bs_price(S, strike, T_t0, risk_free_rate, iv, leg['type'])
+                                # Calcolo T+x (Simulato)
+                                price_sim = bs_price(S, strike, T_sim, risk_free_rate, iv, leg['type'])
+                                
                                 if leg['side'] == 'long':
-                                    leg_y[i] = (sim_price - entry) * 100 * qty
+                                    leg_y_base[i] = (price_t0 - entry) * 100 * qty
+                                    leg_y_sim[i] = (price_sim - entry) * 100 * qty
                                 else:
-                                    leg_y[i] = (entry - sim_price) * 100 * qty
+                                    leg_y_base[i] = (entry - price_t0) * 100 * qty
+                                    leg_y_sim[i] = (entry - price_sim) * 100 * qty
                             
-                            y += leg_y
+                            y_base += leg_y_base
+                            y_sim += leg_y_sim
 
                     # Render Grafico
                     fig, ax = plt.subplots(figsize=(10, 5))
                     fig.patch.set_facecolor('#0e1117') 
                     ax.set_facecolor('#0e1117')
                     
-                    line_color = '#00d4ff' if chart_type == "Payoff a Scadenza (Teorico)" else '#00ff7f'
-                    
-                    ax.plot(x, y, color=line_color, linewidth=2, label=chart_type)
+                    if chart_type == "Payoff a Scadenza (Teorico)":
+                        ax.plot(x, y_base, color='#00d4ff', linewidth=2, label="Payoff a Scadenza")
+                        ax.fill_between(x, 0, y_base, where=(y_base >= 0), facecolor='#00d4ff', alpha=0.1)
+                        ax.fill_between(x, 0, y_base, where=(y_base < 0), facecolor='#ff0000', alpha=0.1)
+                    else:
+                        # Linea T+0 (Oggi)
+                        ax.plot(x, y_base, color='#00ff7f', linewidth=2, label="Curva Oggi (T+0)")
+                        # Linea Simulata T+x
+                        if days_forward > 0:
+                            ax.plot(x, y_sim, color='#ffdd00', linewidth=2.5, linestyle='--', label=f"Simulato (+{days_forward} giorni)")
+                        
+                        ax.fill_between(x, 0, y_base, where=(y_base >= 0), facecolor='#00ff7f', alpha=0.1)
+                        ax.fill_between(x, 0, y_base, where=(y_base < 0), facecolor='#ff0000', alpha=0.1)
+
                     ax.axhline(0, color='white', linestyle='--', linewidth=0.8)
                     ax.axvline(price_base, color='#ff4b4b', linestyle=':', label=f"Prezzo Attuale ({price_base:.2f}$)")
                     
                     marker_color = '#00ff00' if total_pnl >= 0 else '#ff0000'
                     ax.scatter(price_base, total_pnl, color=marker_color, s=150, zorder=5, label=f"At Now P&L (Reale)")
                     
-                    # Riempi l'area sotto/sopra lo zero per renderlo simile all'app
-                    ax.fill_between(x, 0, y, where=(y >= 0), facecolor='#00ff7f', alpha=0.1)
-                    ax.fill_between(x, 0, y, where=(y < 0), facecolor='#ff0000', alpha=0.1)
-
                     ax.tick_params(colors='white')
                     for spine in ax.spines.values(): spine.set_edgecolor('gray')
                     ax.legend(facecolor='#0e1117', edgecolor='white', labelcolor='white')
